@@ -8,4 +8,4 @@ More specifically, this mod adds
 - select a ship and the other sides shiplist gets sorted in range order
 - show how many missiles are targeting each enemy ship
 - formup; match velocity AND move to a formation slot relative to the target ship
-- 
+
