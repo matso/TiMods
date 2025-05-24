@@ -12,6 +12,8 @@ using PavonisInteractive.TerraInvicta.SpaceCombat;
 using PavonisInteractive.TerraInvicta.SpaceCombat.UI;
 using System.Reflection.Emit;
 using TMPro;
+using PavonisInteractive.TerraInvicta.Systems.GameTime;
+using Unity.Entities;
 
 
 // control salvo size; press CTRL when firing a salvo and the salvo size will be just 1 missile.
@@ -23,6 +25,7 @@ namespace CombatHacks
         public static UnityModManager.ModEntry mod;
         private static bool patched = false;
         private static Harmony harmony;
+        private static GameTimeManager gameTime;
 
         //This is standard code, you can just copy it directly into your mod
         static bool Load(UnityModManager.ModEntry modEntry)
@@ -42,6 +45,7 @@ namespace CombatHacks
                 Debug.Log("Patching CombatHacks");
                 harmony.PatchAll();
                 patched = true;
+                gameTime = World.Active.GetExistingManager<GameTimeManager>();
             }
         }
 
@@ -105,8 +109,8 @@ namespace CombatHacks
             }
 
         }
-*/
 
+*/
 
         [HarmonyPatch(typeof(SalvoFireMode), "OnWeaponModeChanged")]
         [HarmonyPatch(new Type[] { typeof(ShipWeaponModeChanged) })]
@@ -116,20 +120,19 @@ namespace CombatHacks
             {
                 if (Hacks.enabled)
                 {
-                    if (Input.GetKey(KeyCode.LeftControl))
+                    if (e.ship.faction == SortShipList.canvasController.activePlayer && TIInputManager.IsAltKeyDown)
                     {
                         // Cut salvos size to 1 by setting already fired shots to salvoSize -1; 
                         var salvosize = (int)__instance.GetType().GetField("_totalSalvo", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(__instance);
                         var shotsFireRef = __instance.GetType().GetField("_shotsFired", BindingFlags.NonPublic | BindingFlags.Instance);
                         int shotsFired = (int)shotsFireRef.GetValue(__instance);
-                        int desired = salvosize - 1;
-                        if (shotsFired != desired)
+                        if (shotsFired != salvosize)
                         {
-                            shotsFireRef.SetValue(__instance, desired);
-                            // Debug.Log("Setting shots fired to " + desired);
+                            // set shots fired to salvosize -1, allowing 1 more missile to be fired.
+                            Debug.Log("Salvo 1 missile");
+                            shotsFireRef.SetValue(__instance, salvosize - 1);
                         }
                     }
-
                 }
             }
         }
@@ -140,148 +143,80 @@ namespace CombatHacks
         static class SortShipList
         {
             internal static CombatShipController enemyShip;
+            internal static CombatShipController enemyCandidate;
             internal static CombatShipController friendlyShip;
-            internal static SpaceCombatCanvasController canvasController;
+            internal static CombatShipController friendlyCandidate;
+            public static SpaceCombatCanvasController canvasController;
             private static List<CombatShipController> rightHandOrdering;
             private static List<CombatShipController> leftHandOrdering;
+            private static int lastEnemyShipSelectTime;
+            private static int lastFriendlyShipSelectTime;
 
-            public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+            public static void Postfix(SpaceCombatCanvasController __instance, List<CombatShipController> shipsToHighlight)
             {
-
-                if (Hacks.enabled)
-                {
-                    Debug.Log("... patching SetupShipLists");
-                    MethodInfo addRangeMethodInfo = typeof(List<CombatantController>).GetMethod("AddRange");
-                    MethodInfo resortLeftMethodInfo = typeof(SortShipList).GetMethod("ResortLeft");
-                    MethodInfo resortRightMethodInfo = typeof(SortShipList).GetMethod("ResortRight");
-
-                    List<CodeInstruction> instructionList = instructions.ToList();
-                    List<CodeInstruction> buffer = new List<CodeInstruction>();
-                    List<CodeInstruction> result = new List<CodeInstruction>();
-                    Boolean leftResort = false;
-                    Boolean leftDone = false;
-                    Boolean rightDone = false;
-
-                    for (int i = 0; i < instructionList.Count; i++)
-                    {
-                        CodeInstruction instruction = instructionList[i];
-                        if (instruction.Calls(addRangeMethodInfo))
-                        {
-                            // Debug.Log("detects AddRange call at " + i + ", bufSize " + buffer.Count());
-                            if (buffer.Count() == 4)
-                            {
-                                buffer.RemoveAt(buffer.Count() - 1); // remove the load of activeShipControllers; want to be called with the containing object as param
-                                result.AddRange(buffer);
-                                buffer.Clear();
-                                if (leftResort)
-                                {
-                                    result.Add(new CodeInstruction(OpCodes.Call, resortLeftMethodInfo));
-                                    Debug.Log("... patching left AddRange call at " + i);
-                                    leftDone = true;
-                                }
-                                else
-                                {
-                                    result.Add(new CodeInstruction(OpCodes.Call, resortRightMethodInfo));
-                                    Debug.Log("... patching right AddRange call at " + i);
-                                    rightDone = true;
-                                }
-                                continue; // skip the call to addRange
-                            }
-                        }
-                        if (buffer.Count() > 5)
-                        {
-                            //Debug.Log("giving up on AddRange call at " + i);
-                            result.AddRange(buffer);
-                            buffer.Clear();
-                        }
-                        if (buffer.Count() > 0)
-                        {
-                            // Debug.Log("waiting for AddRange call at " + i + ", instr " + instruction);
-                            buffer.Add(instruction);
-                            continue;
-                        }
-                        if (instruction.opcode == OpCodes.Ldloc_2 && !leftDone)
-                        {
-                            // Debug.Log("start wait for left AddRange call at " + i);
-                            buffer.Add(instruction);
-                            leftResort = true;
-                        }
-                        if (instruction.opcode.Value == 0x11 && !rightDone)
-                        {
-                            // Debug.Log("start wait for right AddRange call at " + i + ", " + instruction + ", op " + instruction.operand);
-                            buffer.Add(instruction);
-                            leftResort = false;
-                        }
-                        if (buffer.Count() == 0)
-                        {
-                            result.Add(instruction);
-                        }
-                    }
-                    result.AddRange(buffer);
-
-                    int j = 0;
-                    for (int i = 0; i < instructionList.Count(); i++)
-                    {
-                        if (!result[j].Equals(instructionList[i]))
-                        {
-                            // Debug.Log("diffs: " + i + ": " + instructionList[i] + " != " + result[j]);
-                            i++;
-                        }
-                        j++;
-                    }
-                    return result.AsEnumerable();
-                }
-                return instructions;
-            }
-            public static void ResortLeft(List<CombatantController> list, CombatFleetController controller)
-            {
-
-                // This replaces the list2.AddRange(this.leftHandFleetController.activeShipControllers);
-                // we first resort the activeShipControllers, then do the AddRange to list before returning
-                DoResort(list, controller, leftHandOrdering);
-            }
-            public static void ResortRight(List<CombatantController> list, CombatFleetController controller)
-            {
-                DoResort(list, controller, rightHandOrdering);
-            }
-
-            private static void DoResort(List<CombatantController> list, CombatFleetController controller, List<CombatShipController> orderedList)
-            {
-                if (orderedList != null)
-                {
-                    // Debug.Log("Using custom ordering");
-                    controller.activeShipControllers = new List<CombatShipController>(orderedList);
-                }
-                list.AddRange(controller.activeShipControllers);
-            }
-
-            internal static void checkForResort(bool forceReorder)
-            {
-                if (canvasController == null) return;
-
-                Boolean update = forceReorder;
-                if (friendlyShip != null)
-                {
-                    IList<CombatShipController> enemies = canvasController.rightHandFleetController.activeShipControllers;
-                    var enemyDistances = CalcDistances(friendlyShip.position, enemies);
-                    rightHandOrdering = (from e in enemyDistances orderby e.Value select e.Key).ToList();
-                    update = update || !rightHandOrdering.Equals(enemies);
-                }
-
                 if (enemyShip != null)
                 {
                     IList<CombatShipController> friendlies = canvasController.leftHandFleetController.activeShipControllers;
                     var friendlyDistances = CalcDistances(enemyShip.position, friendlies);
                     leftHandOrdering = (from e in friendlyDistances orderby e.Value select e.Key).ToList();
-                    update = update || !leftHandOrdering.Equals(friendlies);
-                    // Debug.Log("sort friendly, enemyShip " + enemyShip + ", " + Stringify(friendlyDistances) + " -> " + Stringify(leftHandOrdering));
+
+                    Debug.Log("Resort friendly, lHO " + leftHandOrdering.Count + ", " + __instance.friendlyShipList.size);
+                    ResortShipList(__instance, shipsToHighlight, __instance.friendlyShipList, leftHandOrdering);
                 }
-                if (update)
+                if (friendlyShip != null)
                 {
-                    // Debug.Log("resort...");
-                    // the method we need is private, so ...
-                    UpdateShipLists();
+                    IList<CombatShipController> enemies = canvasController.rightHandFleetController.activeShipControllers;
+                    var enemyDistances = CalcDistances(friendlyShip.position, enemies);
+                    rightHandOrdering = (from e in enemyDistances orderby e.Value select e.Key).ToList();
+
+                    Debug.Log("Resort enemy, rHO " + rightHandOrdering.Count + ", " + __instance.enemyShipList.size);
+                    ResortShipList(__instance, shipsToHighlight, __instance.enemyShipList, rightHandOrdering);
                 }
+            }
+
+            private static void ResortShipList(SpaceCombatCanvasController __instance, List<CombatShipController> shipsToHighlight, ListManagerBase shipList, List<CombatShipController> sortedShips)
+            {
+                int index = 0;
+                using (IEnumerator<object> enumerator = shipList.GetEnumerator())
+                {
+                    while (enumerator.MoveNext())
+                    {
+                        CombatantController cc = sortedShips[index];
+
+                        CombatantListItemController shipListItemController = (CombatantListItemController)enumerator.Current;
+                        shipListItemController.Init(__instance, cc, index);
+                        cc.UIController().InitializeForCombat(cc, shipListItemController);
+                        if (!cc.isDestroyed)
+                        {
+                            shipListItemController.gameObject.SetActive(true);
+                            if (shipsToHighlight != null && shipsToHighlight.Contains(cc.ref_shipController))
+                            {
+                                shipListItemController.highlightObject.SetActive(true);
+                            }
+                        }
+                        index++;
+                    }
+                }
+            }
+
+            internal static void CheckForResort()
+            {
+                if (canvasController == null)
+                {
+                    Clear();
+                    return;
+                }
+                if (friendlyShip != null && friendlyShip.isDestroyed)
+                {
+                    friendlyShip = null;
+                    rightHandOrdering = null;
+                }
+                if (enemyShip != null && enemyShip.isDestroyed)
+                {
+                    enemyShip = null;
+                    leftHandOrdering = null;
+                }
+                UpdateShipLists();
             }
 
             private static string Stringify(Dictionary<CombatShipController, double> dict)
@@ -314,13 +249,49 @@ namespace CombatHacks
 
             internal static void SelectEnemyShip(CombatShipController ship)
             {
-                enemyShip = ship;
-                checkForResort(true);
+                SelectShip(ship, ref enemyShip, ref enemyCandidate, ref lastEnemyShipSelectTime);
             }
+
             internal static void SelectFriendlyShip(CombatShipController ship)
             {
-                friendlyShip = ship;
-                checkForResort(true);
+                SelectShip(ship, ref friendlyShip, ref friendlyCandidate, ref lastFriendlyShipSelectTime);
+            }
+
+            internal static void SelectShip(CombatShipController ship, ref CombatShipController selectedShip, ref CombatShipController candidateShip, ref int shipSelectTime)
+            {
+                int now = Environment.TickCount;
+
+                if (ship == null)
+                {
+                    Debug.Log("Unselected ship " + P(selectedShip));
+                    selectedShip = null;
+                    shipSelectTime = 0;
+                    candidateShip = null;
+                    CheckForResort();
+                }
+                else
+                {
+                    if (now - shipSelectTime < 300 && candidateShip == ship)
+                    {
+                        // unselect by selecting again
+                        selectedShip = selectedShip == ship ? null : ship;
+                        Debug.Log("Selected ship " + P(selectedShip) + "(" + P(ship) + ")");
+
+                        CheckForResort();
+                        shipSelectTime = 0;
+                    }
+                    else
+                    {
+                        shipSelectTime = now;
+                        candidateShip = ship;
+                    }
+                }
+
+            }
+
+            private static string P(CombatShipController ship)
+            {
+                return ship?.ShipState.displayName;
             }
 
             internal static void Clear()
@@ -348,25 +319,49 @@ namespace CombatHacks
                 if (e.target != null)
                 {
                     TISpaceShipState tispaceShipState = e.target.GetTargetableState() as TISpaceShipState;
-                    if (((tispaceShipState != null) ? tispaceShipState.faction : null) != canvasController.activePlayer)
+                    if (tispaceShipState?.faction != canvasController.activePlayer)
                     {
                         CombatShipController target = (CombatShipController)canvasController.combatMgr.combatantLookup[tispaceShipState];
-                        if (target != SortShipList.enemyShip)
+                        if (TIInputManager.IsControlKeyDown)
                         {
-                            Debug.Log("Selected friendly ship " + target);
+                            SortShipList.SelectEnemyShip(null);
+                        }
+                        else
+                        {
                             SortShipList.SelectEnemyShip(target);
                         }
                     }
                 }
-
             }
 
             public void OnCombatSecond(CombatSecond e)
             {
                 // Debug.Log("CombatSecond " + e);
-                SortShipList.checkForResort(false);
+                // SortShipList.CheckForResort(false); // can't do this, costs way too much
+            }
+
+            public void OnGameTimeSpeedChanged(GameTimeSpeedChanged e)
+            {
+                SortShipList.CheckForResort();
             }
         }
+
+
+        [HarmonyPatch(typeof(SpaceCombatCanvasController), "DeselectShip")]
+        [HarmonyPatch(new Type[] { typeof(CombatShipController) })]
+        static class OnDeselectShip
+        {
+            public static void Postfix(SpaceCombatCanvasController __instance)
+            {
+                if (SortShipList.friendlyShip != null)
+                {
+                    Debug.Log("Unselected friendly ship");
+                    SortShipList.SelectFriendlyShip(null);
+                }
+            }
+        }
+
+
         [HarmonyPatch(typeof(SpaceCombatCanvasController), "SelectPrimaryShip")]
         [HarmonyPatch(new Type[] { typeof(CombatShipController) })]
         static class OnSelectPrimaryShip
@@ -375,9 +370,22 @@ namespace CombatHacks
             {
                 if (shipController != SortShipList.friendlyShip)
                 {
-                    // Debug.Log("Selected friendly ship " + shipController);
+                    Debug.Log("Selected friendly ship " + shipController + ", input " + GetKeyDown() ?? "null");
                     SortShipList.SelectFriendlyShip(shipController);
                 }
+            }
+
+            public static KeyCode? GetKeyDown()
+            {
+                foreach (var item in Enum.GetValues(typeof(KeyCode)))
+                {
+                    var key = (KeyCode)item;
+                    if (Input.GetKeyDown(key))
+                    {
+                        return key;
+                    }
+                }
+                return null;
             }
 
             [HarmonyPatch(typeof(SpaceCombatCanvasController), "Show")]
@@ -391,7 +399,6 @@ namespace CombatHacks
                         SortShipList.Clear();
                         listener = new TargetListener(__instance);
                         GameControl.eventManager.AddListener<CombatTargetedableStateSelected>(new EventManager.EventDelegate<CombatTargetedableStateSelected>(listener.OnCombatTargetableStateSelected), null, null, false, false);
-                        GameControl.eventManager.AddListener<CombatSecond>(new EventManager.EventDelegate<CombatSecond>(listener.OnCombatSecond), null, null, true, false);
                     }
                 }
 
@@ -407,7 +414,6 @@ namespace CombatHacks
                         if (OnShow.listener != null)
                         {
                             GameControl.eventManager.RemoveListener<CombatTargetedableStateSelected>(new EventManager.EventDelegate<CombatTargetedableStateSelected>(OnShow.listener.OnCombatTargetableStateSelected), null);
-                            GameControl.eventManager.RemoveListener<CombatSecond>(new EventManager.EventDelegate<CombatSecond>(OnShow.listener.OnCombatSecond), null);
                             OnShow.listener = null;
                         }
                     }
